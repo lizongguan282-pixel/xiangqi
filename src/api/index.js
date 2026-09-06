@@ -170,7 +170,7 @@ const api = {
   login: (code, nickname, avatarUrl) => request('/api/user/login', 'POST', { code, nickname, avatarUrl }),
   me: () => request('/api/user/me'),
   // 房间
-  createRoom: () => request('/api/room/create', 'POST', { mode: 'flip', gameTime: 600, stepTime: 60 }),
+  createRoom: (mode = 'flip') => request('/api/room/create', 'POST', { mode, gameTime: 600, stepTime: 60 }),
   joinRoom: (roomId) => request('/api/room/join', 'POST', { roomId }),
   getRoom: (roomId) => request('/api/room/' + roomId),
   setReady: (roomId, ready) => request('/api/room/ready', 'POST', { roomId, ready }),

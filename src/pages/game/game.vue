@@ -2,7 +2,7 @@
   <view class="page">
     <view class="nav">
       <text class="nav-btn" @click="goBack">‹ 返回</text>
-      <text class="mode-tag">{{ mode === 'flip' ? '揭棋' : '标准' }}</text>
+      <text class="mode-tag">{{ modeLabel }}</text>
       <text class="god-tag" v-if="godMode">上帝视角</text>
       <view class="nav-right">
         <text class="nav-btn" :class="{ disabled: moveCount === 0 || gameOver }" @click="undo">悔棋</text>
@@ -19,6 +19,10 @@
           mode="aspectFill"
           @error="onAvatarError('black')"
         />
+      </view>
+      <!-- 表情气泡：显示在头像旁，3 秒后消失 -->
+      <view v-if="emojiBubble.black" class="emoji-bubble">
+        <image class="emoji-bubble-img" :src="emojiUrl(emojiBubble.black)" mode="aspectFit" />
       </view>
       <!-- 黑方战利品：黑方吃到的暗子对红方视角只显示"？" -->
       <view class="cap-tray">
@@ -125,6 +129,54 @@
       <view v-if="floatText" class="float-text" :class="{ big: floatBig }">{{ floatText }}</view>
     </view>
 
+    <!-- 背景音乐控制：左下角音量图标（点击静音/取消静音，长按弹出音量调节；走子音效不受影响） -->
+    <view class="bgm-btn" :class="{ muted: bgmMuted }" @click="toggleBgmMute" @longpress="showBgmPanel = true">
+      <text>{{ bgmMuted ? '🔇' : '🔊' }}</text>
+    </view>
+
+    <!-- 快捷表情：音量图标旁的表情按钮（点击开/关表情面板） -->
+    <view class="emoji-btn" @click="toggleEmojiPanel">
+      <text>😀</text>
+    </view>
+    <!-- 表情选择面板：白色圆角框，网格展示，超出可滚动；点遮罩关闭 -->
+    <view class="mask emoji-mask" v-if="showEmojiPanel" @click="showEmojiPanel = false">
+      <view class="emoji-panel" @click.stop>
+        <scroll-view class="emoji-scroll" scroll-y :show-scrollbar="true">
+          <view class="emoji-grid">
+            <view
+              v-for="(e, i) in emojis"
+              :key="i"
+              class="emoji-item"
+              @click="pickEmoji(e)"
+            >
+              <image class="emoji-item-img" :src="emojiUrl(e)" mode="aspectFit" />
+            </view>
+          </view>
+        </scroll-view>
+      </view>
+    </view>
+    <view class="mask bgm-mask" v-if="showBgmPanel" @click="showBgmPanel = false">
+      <view class="modal bgm-modal" @click.stop>
+        <text class="modal-title">背景音乐</text>
+        <view class="bgm-slider-row">
+          <text class="bgm-slider-icon">{{ bgmMuted ? '🔇' : '🔊' }}</text>
+          <slider
+            class="bgm-slider"
+            :value="Math.round(bgmVolume * 100)"
+            min="0"
+            max="100"
+            activeColor="#c0392b"
+            backgroundColor="#d9c39a"
+            block-size="24"
+            @change="onBgmSliderChange"
+          />
+          <text class="bgm-slider-val">{{ Math.round(bgmVolume * 100) }}</text>
+        </view>
+        <text class="modal-sub">点击左下角图标可静音 · 走子音效不受影响</text>
+        <button class="confirm-btn" @click="showBgmPanel = false">好的</button>
+      </view>
+    </view>
+
     <!-- 下方玩家栏：红方（红棋在棋盘下方） -->
     <view class="player-bar">
       <view class="avatar-frame">
@@ -134,6 +186,10 @@
           mode="aspectFill"
           @error="onAvatarError('red')"
         />
+      </view>
+      <!-- 表情气泡：显示在头像旁，3 秒后消失 -->
+      <view v-if="emojiBubble.red" class="emoji-bubble">
+        <image class="emoji-bubble-img" :src="emojiUrl(emojiBubble.red)" mode="aspectFit" />
       </view>
       <!-- 红方战利品：红方吃到的暗子对黑方视角只显示"？" -->
       <view class="cap-tray">
@@ -161,12 +217,26 @@
       </view>
     </view>
 
-    <view class="mask" v-if="gameOver">
+    <view class="mask" v-if="gameOver && !waitingRematch">
       <view class="modal">
         <text class="modal-title">{{ result.winner === myColor ? '你赢了！' : '你输了' }}</text>
         <text class="modal-sub">{{ players[result.winner] ? players[result.winner].nickname : '' }} · {{ result.reason }}</text>
         <button class="confirm-btn" @click="restart">再来一局</button>
         <button class="ghost-btn" @click="goBack">返回房间</button>
+      </view>
+    </view>
+
+    <!-- 再来一局：等待对方回应 -->
+    <view class="mask" v-if="waitingRematch">
+      <view class="modal">
+        <text class="modal-title">等待对方回应</text>
+        <text class="modal-sub">对方点击「再来一局」后将自动开始新对局</text>
+        <view class="waiting-dots">
+          <text class="dot"></text>
+          <text class="dot"></text>
+          <text class="dot"></text>
+        </view>
+        <button class="ghost-btn" @click="cancelRematch">取消</button>
       </view>
     </view>
   </view>
@@ -184,6 +254,15 @@ import api, { DEFAULT_AVATAR } from '../../api'
 
 const GAME_TIME = 10 * 60 // 局时 10 分
 const STEP_TIME = 60 // 步时 1 分
+
+// 背景音乐外链（CDN / 自有服务器），不打入小程序包（避免超 2MB 限制）
+// 注意：该域名必须已加入小程序后台「downloadFile 合法域名」，否则真机无法加载
+const BGM_URL = 'https://gcwtnunyhfap.sealosbja.site/static/bgm.mp3'
+
+// 局内快捷表情（图片版）：文件位于 src/static/emoji/eN.png
+// 替换/新增表情：直接覆盖同名图片文件，或增删改此数组（代号必须与文件名一致，如 'e9' → e9.png）
+// WS 只传代号（e1~e8），双端各自从本地 static 渲染
+const EMOJIS = ['e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8']
 
 const emptyHidden = () => Array.from({ length: 10 }, () => Array(9).fill(false))
 
@@ -203,7 +282,9 @@ function serverToLocal(state, isGod) {
           board[r][c] = pc.color === 'red' ? pc.t.toUpperCase() : pc.t.toLowerCase()
         } else {
           // 普通视角：暗子用 Q(红)/q(黑) 占位，真身不可见
-          board[r][c] = pc.color === 'red' ? 'Q' : 'q'
+          // 占位颜色按"位置方"（row>=5 红半场）而非下发的 color：
+          // 全随机模式暗子归属跟所在半场，且真身颜色绝不能从渲染层泄露
+          board[r][c] = r >= 5 ? 'Q' : 'q'
         }
         hidden[r][c] = true
       } else {
@@ -269,6 +350,16 @@ export default {
       lastMoveCount: -1,
       firedCheckCount: -1, // 已弹过"将军"浮字的步数（防轮询重复弹）
       unsubs: [], // WebSocket 订阅取消函数
+      moveAudio: null, // 走子音效播放器（uni.createInnerAudioContext 单例）
+      waitingRematch: false, // 已请求再来一局，等待对方回应
+      bgmAudio: null, // 背景音乐播放器（对局中循环播放）
+      bgmMuted: false, // 背景音乐静音（仅影响 BGM，走子音效不受影响）
+      bgmVolume: 0.35, // 背景音乐音量 0~1
+      showBgmPanel: false, // 音量调节浮层
+      showEmojiPanel: false, // 表情选择面板
+      emojis: EMOJIS, // 表情列表（模板网格渲染）
+      emojiBubble: { red: '', black: '' }, // 头像旁显示的表情气泡
+      emojiTimers: { red: null, black: null }, // 气泡消失定时器
       // 炮位与兵位坐标（列 0-8，行 0-9）
       marks: [
         { c: 1, r: 2 },
@@ -289,8 +380,13 @@ export default {
     }
   },
   computed: {
+    // 导航栏模式名
+    modeLabel() {
+      return this.mode === 'random' ? '全随机' : this.mode === 'standard' ? '标准' : '揭棋'
+    },
+    // 翻棋类模式（揭棋 / 揭棋全随机）：暗子按位置行为、翻开士相解限
     flipMode() {
-      return this.mode === 'flip'
+      return this.mode === 'flip' || this.mode === 'random'
     },
     // 玩家栏按棋子颜色固定：黑方棋子在棋盘上方(row 0)→ 黑方栏在上；红方棋子在下方(row 9)→ 红方栏在下。
     // 双方客户端看到的朝向一致（不翻屏）；"我是哪方"仅用于走子权限、战利品视角保密和胜负文案。
@@ -339,6 +435,20 @@ export default {
       setTimeout(() => this.goBack(), 800)
       return
     }
+    // 背景音乐：读取持久化的静音/音量设置并开始循环播放（正式对局中）
+    const m = uni.getStorageSync('bgmMuted')
+    if (m === true || m === false) this.bgmMuted = m
+    const v = parseFloat(uni.getStorageSync('bgmVolume'))
+    if (!isNaN(v) && v >= 0 && v <= 1) this.bgmVolume = v
+    try {
+      const audio = uni.createInnerAudioContext()
+      audio.src = BGM_URL // 外链 CDN/服务器音频，包内不携带
+      audio.loop = true
+      audio.volume = this.bgmMuted ? 0 : this.bgmVolume
+      this.bgmAudio = audio
+      this.applyBgmRate() // 初始速度按当前 inCheck（onLoad 时为 false → 1.0x）
+      if (!this.bgmMuted) audio.play()
+    } catch (e) {}
     this.loadState()
     this.bindWS()
   },
@@ -347,6 +457,22 @@ export default {
     clearInterval(this.syncTimer)
     clearTimeout(this.floatTimer)
     clearTimeout(this.overTimer)
+    // 销毁走子音效与背景音乐播放器
+    if (this.moveAudio) {
+      try {
+        this.moveAudio.destroy()
+      } catch (e) {}
+      this.moveAudio = null
+    }
+    if (this.bgmAudio) {
+      try {
+        this.bgmAudio.destroy()
+      } catch (e) {}
+      this.bgmAudio = null
+    }
+    // 清理表情气泡定时器
+    clearTimeout(this.emojiTimers.red)
+    clearTimeout(this.emojiTimers.black)
     // 取消所有 WebSocket 订阅
     this.unsubs.forEach((off) => off())
     this.unsubs = []
@@ -354,14 +480,16 @@ export default {
   methods: {
     // 某方（我/对方）的战利品分组。视角规则：
     // 我方盘子：自己吃到的子全部见真身（服务端下发真实 t）
-    // 对方盘子：明棋正常显示；对方吃到的暗子（wasHidden=true）只显示"？"（t 已在 serverToLocal 转成 Q/q）
+    // 对方盘子：明棋正常显示；揭棋模式下对方吃到的暗子（wasHidden=true）只显示"？"
+    // 全随机（random）模式：战利品全公开，明子暗子均显示真实身份（对接文档 §4）
     capTraysFor(side) {
       const groups = []
       const map = {}
       const isMine = side === this.myColor
+      const publicCaptures = this.mode === 'random'
       for (const it of (this.captured[side] || [])) {
-        const displayT = isMine || !it.wasHidden ? it.t : (this.isRedP(it.t) ? 'Q' : 'q')
-        const key = (it.wasHidden ? 'H' : 'O') + displayT
+        const displayT = isMine || !it.wasHidden || publicCaptures ? it.t : (this.isRedP(it.t) ? 'Q' : 'q')
+        const key = displayT
         if (!map[key]) {
           map[key] = { t: displayT, count: 0 }
           groups.push(map[key])
@@ -407,9 +535,9 @@ export default {
       // 确保已连接（首页登录后已连，保险重连一次）
       const token = uni.getStorageSync('token')
       if (token) ws.connect(token)
-      // move_applied：对手落子 → 用下发的 State 刷新
+      // move_applied：对手落子 → 用下发的 State 刷新（带 fromMove 播落子音效）
       this.unsubs.push(
-        ws.on('move_applied', (state) => this.applyServerState(state))
+        ws.on('move_applied', (state) => this.applyServerState(state, { fromMove: true }))
       )
       // game_over：终局（winner + reason）
       this.unsubs.push(
@@ -462,8 +590,18 @@ export default {
       // game_start：再来一局重新开局
       this.unsubs.push(
         ws.on('game_start', (state) => {
+          this.waitingRematch = false // 对方已回应，关闭"等待对方回应"窗口
           this.lastMoveCount = -1
           this.applyServerState(state)
+        })
+      )
+      // emoji：对方发送的快捷表情 → 在其头像旁显示气泡
+      //（自己发的已在本地显示，服务端回显 same from 时跳过防重复）
+      this.unsubs.push(
+        ws.on('emoji', (data) => {
+          if (data && data.from && data.code && data.from !== this.myColor) {
+            this.showEmoji(data.from, data.code)
+          }
         })
       )
     },
@@ -504,9 +642,11 @@ export default {
     applyServerState(state, opts) {
       if (!state) return
       const force = !!(opts && opts.force)
+      const fromMove = !!(opts && opts.fromMove) // 来自走子（本地确认 / 对手 move_applied），需播落子音效
       const isEnded = state.status === 'ended'
       // god 是用户级属性，局内不会消失：一旦确认为上帝就锁定，防止个别响应漏带 god 字段导致透视闪烁变"？"
-      if (!this.godMode && state.god === true) this.godMode = true
+      // 全随机（random）模式下上帝模式强制关闭：即使后端漏拦，前端也不再开启透视
+      if (!this.godMode && state.god === true && state.mode !== 'random') this.godMode = true
       const local = serverToLocal(state, this.godMode)
       if (state.myColor) this.myColor = state.myColor
       if (state.players) {
@@ -532,6 +672,11 @@ export default {
         this.captured = local.captured
         this.sel = null
         this.targets = []
+        // 落子音效：仅当确为一步新走子（moveCount 前进、且来自走子通道）时播放。
+        // 轮询/初始加载/god-swap/重开不播；绝杀的最后一步也播（changed&&!stale 成立）
+        if (fromMove && changed && !stale) {
+          this.playMoveSound()
+        }
       }
       if (isEnded) {
         // 棋盘已应用，再走统一终局入口（handleEnd 内 ending 门闩，重复调用安全）
@@ -547,8 +692,16 @@ export default {
         this.floatText = ''
         clearTimeout(this.overTimer)
         this.startTimer()
+        // 终局时轮询已自停（见 startSync 内 gameOver 短路），rematch/重开后必须重启，
+        // 否则 game_start 推送一旦丢失（后端漏推/WS 抖动）就再也无法自愈，只能刷新
+        this.startSync()
+        this.resumeBgm() // 新对局开始，恢复背景音乐
       }
+      // 将军进入/解除时同步 BGM 速度：将军 1.2x，解除 1.0x
+      // （rate 由 inCheck 派生，所有修改 inCheck 的点都必须调用 applyBgmRate）
+      const wasCheck = this.inCheck
       this.inCheck = !!state.check
+      if (wasCheck !== this.inCheck) this.applyBgmRate()
       // 将军浮字只在"新一步造成将军"时弹一次（moveCount 去重），轮询/重发不重复弹
       if (state.check) {
         if (this.firedCheckCount !== state.moveCount) {
@@ -565,6 +718,13 @@ export default {
       this.ending = true
       clearInterval(this.timer)
       this.inCheck = false
+      this.applyBgmRate() // 终局强制恢复 1.0x：若认输发生在将军期，下一局 resumeBgm 不会继承 1.2x
+      // 对局结束：背景音乐停止（仅正式对局中播放；走子音效不受影响）
+      if (this.bgmAudio) {
+        try {
+          this.bgmAudio.pause()
+        } catch (e) {}
+      }
       // reason 枚举与 docs/api.md §3.3 对齐：绝杀(将死) / 困毙 / 认输 / 超时
       if (reason === '绝杀' || reason === '困毙') {
         this.pendingOver = true
@@ -591,6 +751,99 @@ export default {
         }, duration)
       }
     },
+    // 走子音效：每步落子播放一次（本地走子 + 对手走子均触发），
+    // 作为"轮到谁"的听觉提示。用单例 InnerAudioContext，重复调用 seek(0)+play 避免并发叠音
+    playMoveSound() {
+      try {
+        if (!this.moveAudio) {
+          this.moveAudio = uni.createInnerAudioContext()
+          this.moveAudio.src = '/static/move.wav'
+          this.moveAudio.volume = 0.8
+        }
+        this.moveAudio.seek(0)
+        this.moveAudio.play()
+      } catch (e) {
+        // 音效播放失败不影响对局
+      }
+    },
+    // 恢复背景音乐（对局进行中且未静音时）
+    resumeBgm() {
+      if (this.bgmMuted || !this.bgmAudio) return
+      try {
+        this.bgmAudio.play()
+      } catch (e) {}
+    },
+    // BGM 速度由 inCheck 派生：将军 1.2x（紧张感），其余 1.0x。
+    // 所有修改 this.inCheck 的点（applyServerState / handleEnd）都必须调用本方法，
+    // 否则会出现"将军期认输后下一局 BGM 仍 1.2x"的状态泄漏。
+    applyBgmRate() {
+      if (!this.bgmAudio) return
+      const rate = this.inCheck ? 1.2 : 1.0
+      try {
+        if (Math.abs((this.bgmAudio.playbackRate || 1) - rate) > 0.01) {
+          this.bgmAudio.playbackRate = rate
+        }
+      } catch (e) {}
+    },
+    // H5 浏览器可能拦截自动播放：任意点击棋盘时兜底补播（小程序无影响）
+    ensureBgm() {
+      if (this.bgmAudio && !this.bgmMuted && !this.gameOver && !this.pendingOver) {
+        this.resumeBgm()
+      }
+    },
+    // 点击左下角音量图标：静音/取消静音（仅 BGM，走子音效独立不受影响）
+    toggleBgmMute() {
+      this.bgmMuted = !this.bgmMuted
+      uni.setStorageSync('bgmMuted', this.bgmMuted)
+      if (this.bgmAudio) {
+        try {
+          if (this.bgmMuted) {
+            this.bgmAudio.pause()
+          } else {
+            this.bgmAudio.volume = this.bgmVolume
+            if (!this.gameOver && !this.pendingOver) this.bgmAudio.play()
+          }
+        } catch (e) {}
+      }
+    },
+    // 音量滑块调整（0~100 → 0~1）；拖动即取消静音并持久化
+    onBgmSliderChange(e) {
+      const v = e.detail.value / 100
+      this.bgmVolume = v
+      uni.setStorageSync('bgmVolume', v)
+      if (v > 0 && this.bgmMuted) {
+        this.bgmMuted = false
+        uni.setStorageSync('bgmMuted', false)
+      }
+      if (this.bgmAudio) {
+        try {
+          this.bgmAudio.volume = v
+        } catch (e) {}
+      }
+    },
+    // 表情图片路径：代号 eN → /static/emoji/eN.png
+    emojiUrl(code) {
+      return '/static/emoji/' + code + '.png'
+    },
+    // 点击表情按钮：开/关表情选择面板
+    toggleEmojiPanel() {
+      this.showEmojiPanel = !this.showEmojiPanel
+    },
+    // 选中表情：关面板 → 本地气泡立即显示 → WS 发给对方（后端未上线时仅自己可见）
+    pickEmoji(code) {
+      this.showEmojiPanel = false
+      this.showEmoji(this.myColor, code)
+      api.ws.send({ type: 'emoji', roomId: this.roomId, code })
+    },
+    // 表情气泡：显示在 side（red/black）玩家头像旁，3 秒后自动消失
+    showEmoji(side, code) {
+      if (side !== 'red' && side !== 'black') return
+      clearTimeout(this.emojiTimers[side])
+      this.emojiBubble[side] = code
+      this.emojiTimers[side] = setTimeout(() => {
+        this.emojiBubble[side] = ''
+      }, 3000)
+    },
     tick() {
       if (this.gameOver || this.pendingOver) {
         clearInterval(this.timer)
@@ -612,6 +865,7 @@ export default {
       }
     },
     onPieceTap(r, c) {
+      this.ensureBgm() // H5 自动播放被拦截时兜底补播
       if (this.gameOver || this.pendingOver) return
       // 联机：只能操作己方棋子，且必须轮到自己
       if ((this.myColor === 'red') !== this.redToMove) {
@@ -709,7 +963,7 @@ export default {
           const name = PIECE_NAMES[capT] || '子'
           uni.showToast({ title: '你吃掉暗子：' + name, icon: 'none' })
         }
-        this.applyServerState(state)
+        this.applyServerState(state, { fromMove: true })
       } catch (e) {
         uni.showToast({ title: e.message, icon: 'none' })
       }
@@ -736,14 +990,31 @@ export default {
         // 第一个请求方：等对方也请求（双方都 rematch 后服务端自动推 game_start）
         if (data.started) {
           // 双方都已请求，服务端会推 game_start 刷新局面
+          this.waitingRematch = false
+          // 先复位终局门闩，避免 game_start 到来前 UI 停在半复位态（ending=true、旧棋盘）
           this.gameOver = false
+          this.ending = false
+          this.pendingOver = false
           this.result = null
+          this.floatText = ''
+          clearTimeout(this.overTimer)
+          // 重启轮询兜底：若 game_start 推送丢失，2s 轮询会拉到新局面自愈
+          this.startTimer()
+          this.startSync()
+          this.applyBgmRate() // 新对局速度归一（handleEnd 已复位，此处为 resumeBgm 前的双保险）
+          this.resumeBgm() // 新对局开始，恢复背景音乐
         } else {
-          uni.showToast({ title: '已请求再来一局，等待对方同意', icon: 'none' })
+          // 弹出"等待对方回应"窗口，等对方也点再来一局（game_start 到来时自动关闭）
+          this.waitingRematch = true
         }
       } catch (e) {
         uni.showToast({ title: e.message, icon: 'none' })
       }
+    },
+    // 取消再来一局请求：仅本地关闭等待窗口（服务端无取消 rematch 接口，
+    // 对方若随后也点再来一局仍会开局；此处只是让本端不再显示等待态）
+    cancelRematch() {
+      this.waitingRematch = false
     },
     goBack() {
       if (this.roomId) {
@@ -834,6 +1105,7 @@ export default {
   margin: 14rpx 0;
   display: flex;
   align-items: center;
+  position: relative; /* 表情气泡的定位锚点 */
 }
 
 .avatar-frame {
@@ -1353,5 +1625,184 @@ export default {
 
 .ghost-btn::after {
   border: none;
+}
+
+/* 再来一局：等待对方回应的三点跳动动画 */
+.waiting-dots {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 36rpx 0 8rpx;
+  height: 24rpx;
+}
+.waiting-dots .dot {
+  width: 18rpx;
+  height: 18rpx;
+  margin: 0 10rpx;
+  border-radius: 50%;
+  background: #c0392b;
+  opacity: 0.3;
+  animation: dotBounce 1.2s infinite ease-in-out;
+}
+.waiting-dots .dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.waiting-dots .dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@keyframes dotBounce {
+  0%, 80%, 100% {
+    transform: scale(0.6);
+    opacity: 0.3;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* 背景音乐控制：左下角悬浮音量按钮 */
+.bgm-btn {
+  position: fixed;
+  left: 20rpx;
+  bottom: 170rpx;
+  width: 72rpx;
+  height: 72rpx;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.28);
+  border: 2rpx solid rgba(243, 226, 192, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 34rpx;
+  z-index: 30;
+}
+.bgm-btn.muted {
+  opacity: 0.55;
+}
+
+/* 音量调节浮层 */
+.bgm-mask {
+  z-index: 60;
+}
+.bgm-modal {
+  width: 82%;
+}
+.bgm-slider-row {
+  display: flex;
+  align-items: center;
+  margin: 34rpx 6rpx 12rpx;
+}
+.bgm-slider-icon {
+  font-size: 34rpx;
+}
+.bgm-slider {
+  flex: 1;
+  margin: 0 14rpx;
+}
+.bgm-slider-val {
+  min-width: 52rpx;
+  text-align: right;
+  font-size: 26rpx;
+  color: #8a6a3a;
+}
+
+/* 快捷表情：音量图标旁的表情按钮 */
+.emoji-btn {
+  position: fixed;
+  left: 104rpx;
+  bottom: 170rpx;
+  width: 72rpx;
+  height: 72rpx;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  border: 2rpx solid rgba(243, 226, 192, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 34rpx;
+  z-index: 30;
+}
+
+/* 表情选择面板：白色圆角框，贴左下角展开，内部可滚动 */
+.emoji-mask {
+  z-index: 40;
+}
+.emoji-panel {
+  position: fixed;
+  left: 20rpx;
+  bottom: 260rpx;
+  width: 460rpx;
+  max-height: 500rpx;
+  background: #ffffff;
+  border-radius: 20rpx;
+  box-shadow: 0 8rpx 30rpx rgba(0, 0, 0, 0.4);
+  padding: 16rpx;
+  box-sizing: border-box;
+  z-index: 41;
+}
+.emoji-scroll {
+  max-height: 468rpx;
+}
+.emoji-grid {
+  display: flex;
+  flex-wrap: wrap;
+}
+.emoji-item {
+  width: 96rpx;
+  height: 96rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12rpx;
+}
+.emoji-item:active {
+  background: #f0e6d2;
+}
+.emoji-item-img {
+  width: 72rpx;
+  height: 72rpx;
+}
+
+/* 表情气泡：显示在发送者头像旁，弹出动画（白底圆角框内嵌表情图片） */
+.emoji-bubble {
+  position: absolute;
+  left: 76rpx;
+  top: -30rpx;
+  z-index: 20;
+  padding: 10rpx;
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 18rpx;
+  box-shadow: 0 4rpx 12rpx rgba(0, 0, 0, 0.35);
+  animation: emojiPop 0.25s ease-out;
+}
+.emoji-bubble-img {
+  width: 56rpx;
+  height: 56rpx;
+  display: block;
+}
+.emoji-bubble::after {
+  content: '';
+  position: absolute;
+  left: -8rpx;
+  top: 50%;
+  margin-top: -8rpx;
+  border: 8rpx solid transparent;
+  border-right-color: rgba(255, 255, 255, 0.95);
+  border-left: none;
+}
+@keyframes emojiPop {
+  0% {
+    transform: scale(0.3);
+    opacity: 0;
+  }
+  70% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 </style>

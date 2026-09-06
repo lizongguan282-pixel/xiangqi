@@ -53,7 +53,17 @@
       <view class="board-overlay">
         <view class="info-card">
           <view class="card-title">
-            <text>揭棋</text>
+            <text>{{ modeLabel }}</text>
+          </view>
+          <!-- 模式切换：仅影响下一次创建的房间 -->
+          <view class="mode-switch">
+            <view
+              v-for="m in modes"
+              :key="m.v"
+              class="mode-chip"
+              :class="{ active: mode === m.v }"
+              @click="mode = m.v"
+            >{{ m.label }}</view>
           </view>
           <view class="card-body">
             <text class="card-line">局时: 10分</text>
@@ -88,6 +98,7 @@
     <view class="mask" v-if="waiting">
       <view class="modal">
         <text class="modal-title">等待对手</text>
+        <text class="rs-ver">V3</text>
         <text class="room-id-label">房间号</text>
         <view class="room-id-wrap" @click="copyRoomId">
           <text class="room-id">{{ roomId }}</text>
@@ -116,6 +127,10 @@
           </view>
         </view>
         <text class="rs-hint">双方准备后自动开局</text>
+        <!-- 调试行：显示兜底轮询实时拉到的对局状态（定位开局跳转问题用） -->
+        <text class="rs-debug" v-if="debugPoll">{{ debugPoll }}</text>
+        <!-- 双方就绪仍未自动跳转时的手动进入入口（自愈兜底的最后防线） -->
+        <button class="rs-manual" v-if="bothReady" @click="manualEnter">双方已就绪，点此进入对局</button>
         <view class="modal-btn-row">
           <button class="ghost-btn" @click="leaveRoom">退出房间</button>
           <button class="confirm-btn" open-type="share">分享邀请</button>
@@ -186,12 +201,21 @@ export default {
       roomId: '', // 有值=从好友邀请进入 / 已创建房间
       prepared: false,
       waiting: false, // 准备后等待对方 + 开局
+      readyPollTimer: null, // 等待开局兜底轮询（WS 推送丢失时自愈）
+      enteringGame: false, // 跳对局页一次性门闩（防 WS/轮询双触发重复 navigateTo）
+      debugPoll: '', // 等待浮层调试行：轮询实时状态
       roomInfo: null, // Room 结构（room_update 推送 / 查询得到）
       mySide: 'red', // 我是红方还是黑方
       showJoinModal: false,
       joinInput: '',
       unsubs: [], // WS 订阅取消函数
       enteredGame: false, // 本房间是否已进入过对局（返回首页时据此清空旧房间状态）
+      mode: 'flip', // 下一次建房的模式：flip=揭棋 / random=揭棋全随机 / standard=标准
+      modes: [
+        { v: 'flip', label: '揭棋' },
+        { v: 'random', label: '全随机' },
+        { v: 'standard', label: '标准' },
+      ],
       // 炮位与兵位坐标（列 0-8，行 0-9）
       marks: [
         { c: 1, r: 2 },
@@ -212,6 +236,11 @@ export default {
     }
   },
   computed: {
+    // 当前所选模式的中文名（卡片标题/分享文案）
+    modeLabel() {
+      const m = this.modes.find((x) => x.v === this.mode)
+      return m ? m.label : '揭棋'
+    },
     // 等待浮层中"对方"的玩家信息（从 Room 结构按 mySide 取）
     oppPlayer() {
       if (!this.roomInfo) return null
@@ -220,6 +249,11 @@ export default {
     },
     oppInRoom() {
       return !!(this.oppPlayer && this.oppPlayer.userId)
+    },
+    // 双方均已就绪（用于显示"手动进入对局"兜底按钮）
+    bothReady() {
+      const r = this.roomInfo
+      return !!(r && r.red && r.black && r.red.ready && r.black.ready)
     },
   },
   onLoad(options) {
@@ -245,6 +279,7 @@ export default {
     // 否则再点「开始」会对旧房间 setReady 报"房间不存在"，无法新建房
     if (this.enteredGame) {
       this.enteredGame = false
+      this.enteringGame = false // 允许下一局再次跳页
       const oldRoom = this.roomId
       this.waiting = false
       this.prepared = false
@@ -255,12 +290,13 @@ export default {
     }
   },
   onUnload() {
+    this.stopReadyPoll()
     this.unsubs.forEach((off) => off())
     this.unsubs = []
   },
   onShareAppMessage() {
     return {
-      title: '来和我下一局揭棋吧！',
+      title: '来和我下一局' + this.modeLabel + '吧！',
       path: '/pages/index/index' + (this.roomId ? '?roomId=' + this.roomId : ''),
     }
   },
@@ -415,14 +451,71 @@ export default {
         })
       )
       // game_start：双方就绪，服务端自动开局 → 跳对局页
+      // 守卫用"页面栈位置"而非 waiting 标志：加入方 setReady 的 HTTP 响应
+      // 晚于服务端 game_start 推送到达，waiting 尚未置 true，若用 waiting
+      // 守卫会把开局推送漏掉，导致加入方永远卡在"双方已准备"浮层。
+      // 页面栈判断：仅当本页在栈顶（用户停在等待房）才跳页；对局中 game.vue
+      // 在栈顶、本页在后台，rematch 的 game_start 由 game.vue 自行处理，此处忽略。
       this.unsubs.push(
         ws.on('game_start', (state) => {
-          this.waiting = false
-          this.enteredGame = true // 进入过对局：返回首页后旧房间不可复用
-          if (state.myColor) this.mySide = state.myColor
-          uni.navigateTo({ url: '/pages/game/game?roomId=' + this.roomId })
+          this.stopReadyPoll()
+          this.onGameStart(state)
         })
       )
+    },
+    // 开局跳页（WS game_start 与轮询兜底共用入口）
+    // 页面栈守卫：仅当本页在栈顶才跳；对局中 game.vue 在栈顶、本页在后台，
+    // rematch 的 game_start 由 game.vue 自行处理，此处忽略，防叠页。
+    onGameStart(state) {
+      if (this.enteringGame) return
+      const pages = getCurrentPages()
+      const top = pages[pages.length - 1]
+      const tr = String((top && (top.route || top.__route__)) || '')
+      if (tr.indexOf('pages/index/index') === -1) return
+      this.enteringGame = true
+      this.waiting = false
+      this.enteredGame = true // 进入过对局：返回首页后旧房间不可复用
+      if (state && state.myColor) this.mySide = state.myColor
+      uni.navigateTo({ url: '/pages/game/game?roomId=' + this.roomId })
+    },
+    // 等待开局兜底轮询：WS game_start 可能因加入方连接未就绪/后端推送遗漏/竞态丢弃而丢失，
+    // 每 2s 拉一次 GET /state，对局一旦开始立即跳页，不再依赖推送
+    startReadyPoll() {
+      this.stopReadyPoll()
+      this.readyPollTimer = setInterval(async () => {
+        if (!this.roomId) return this.stopReadyPoll()
+        try {
+          const st = await api.getState(this.roomId)
+          this.debugPoll = '轮询状态: ' + (st && st.status ? st.status : '未知')
+          if (st && st.status === 'ended') return this.stopReadyPoll()
+          if (st && (st.status === 'playing' || (!st.status && st.board))) {
+            this.stopReadyPoll()
+            this.onGameStart(st)
+          }
+        } catch (e) {
+          this.debugPoll = '轮询错误: code=' + (e && e.code) + ' ' + (e && e.message)
+          // 房间不存在 → 停止；对局未开始等其它错误 → 继续轮询
+          if (e && e.code === 2001) this.stopReadyPoll()
+        }
+      }, 2000)
+    },
+    // 手动进入对局：双方就绪但自动跳转失效时的最后防线
+    async manualEnter() {
+      try {
+        const st = await api.getState(this.roomId)
+        if (st && st.status === 'playing') {
+          this.onGameStart(st)
+          return
+        }
+      } catch (e) {}
+      // state 尚未 playing 也强行进入（对局页自身会拉取/轮询状态）
+      this.onGameStart(null)
+    },
+    stopReadyPoll() {
+      if (this.readyPollTimer) {
+        clearInterval(this.readyPollTimer)
+        this.readyPollTimer = null
+      }
     },
     // 加入好友房间（邀请链接进入 / 手动输房间号进入）
     async joinRoom() {
@@ -437,6 +530,10 @@ export default {
         await api.setReady(this.roomId, true)
         this.prepared = true
         this.waiting = true
+        // 本地回写自己已 ready：WS 断连时 room_update 收不到，"手动进入"按钮的
+        // bothReady 判断才能正确成立
+        if (this.roomInfo && this.roomInfo[this.mySide]) this.roomInfo[this.mySide].ready = true
+        this.startReadyPoll() // 兜底：WS game_start 丢失时也能进局
       } catch (e) {
         uni.showToast({ title: e.message, icon: 'none' })
       }
@@ -445,8 +542,8 @@ export default {
       if (this.waiting) return
       try {
         if (!this.roomId) {
-          // 创建房间（创建者=红方，揭棋，局时10分/步时1分）
-          const room = await api.createRoom()
+          // 创建房间（创建者=红方，模式取首页选择，局时10分/步时1分）
+          const room = await api.createRoom(this.mode)
           this.roomId = room.roomId
           this.roomInfo = room
           this.mySide = 'red'
@@ -454,6 +551,8 @@ export default {
         await api.setReady(this.roomId, true)
         this.prepared = true
         this.waiting = true
+        if (this.roomInfo && this.roomInfo[this.mySide]) this.roomInfo[this.mySide].ready = true
+        this.startReadyPoll() // 兜底：WS game_start 丢失时也能进局
         // 收到 game_start 推送后自动跳转对局页（见 bindWS）
       } catch (e) {
         uni.showToast({ title: e.message, icon: 'none' })
@@ -476,6 +575,9 @@ export default {
     },
     // 退出房间（真的调用 leaveRoom，服务端会从房间移除，游戏中离开=认输）
     async leaveRoom() {
+      this.stopReadyPoll()
+      this.enteringGame = false
+      this.debugPoll = ''
       try {
         if (this.roomId) await api.leaveRoom(this.roomId)
       } catch (e) {
@@ -821,6 +923,28 @@ export default {
   flex-direction: column;
 }
 
+/* 模式切换芯片（首页信息卡内） */
+.mode-switch {
+  margin-top: 18rpx;
+  display: flex;
+  justify-content: center;
+  gap: 14rpx;
+}
+.mode-chip {
+  padding: 10rpx 30rpx;
+  border-radius: 28rpx;
+  font-size: 26rpx;
+  color: #7a6234;
+  background: #f0e4c2;
+  border: 2rpx solid #d9c39a;
+}
+.mode-chip.active {
+  color: #fffdf5;
+  background: linear-gradient(180deg, #e0b05a, #c78f2a);
+  border-color: #a97817;
+  font-weight: bold;
+}
+
 .card-line {
   font-size: 34rpx;
   color: #3a2a1a;
@@ -1096,6 +1220,38 @@ export default {
   margin-top: 24rpx;
   font-size: 26rpx;
   color: #bfae8a;
+}
+
+/* 调试行：兜底轮询实时状态 */
+.rs-debug {
+  margin-top: 12rpx;
+  font-size: 22rpx;
+  color: #9a8a6a;
+}
+
+/* 版本标记：V3=包含开局兜底修复的包（用于确认设备跑的是新代码） */
+.rs-ver {
+  position: absolute;
+  top: 16rpx;
+  right: 24rpx;
+  font-size: 22rpx;
+  color: #b0956a;
+  border: 1rpx solid #d8c39a;
+  border-radius: 8rpx;
+  padding: 2rpx 10rpx;
+}
+
+/* 双方就绪仍未跳转时的手动进入按钮 */
+.rs-manual {
+  margin-top: 20rpx;
+  width: 100%;
+  height: 76rpx;
+  line-height: 76rpx;
+  font-size: 28rpx;
+  color: #fff;
+  background: linear-gradient(135deg, #d8a24a, #b97f2e);
+  border-radius: 40rpx;
+  padding: 0;
 }
 
 .ghost-btn {

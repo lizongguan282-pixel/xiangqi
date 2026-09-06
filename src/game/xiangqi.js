@@ -58,8 +58,12 @@ export function createInitialBoard() {
 }
 
 function inPalace(p, r, c) {
+  return inPalaceSide(isRed(p), r, c)
+}
+
+function inPalaceSide(redSide, r, c) {
   if (c < 3 || c > 5) return false
-  return isRed(p) ? r >= 7 && r <= 9 : r >= 0 && r <= 2
+  return redSide ? r >= 7 && r <= 9 : r >= 0 && r <= 2
 }
 
 // 揭棋：位置原始类型（由标准开局摆法决定，上下对称，与颜色无关）
@@ -94,6 +98,9 @@ export function pieceMoves(board, r, c, hidden, flipMode) {
   }
   // 揭棋下翻开的子（非帅将，帅将开局明置）解除九宫/河界限制
   const free = !!flipMode && !(hidden && hidden[r][c])
+  // 暗子行为方向跟"位置所在一方"（全随机模式下暗子颜色可能与位置方不同；
+  // flip 模式下颜色恒等于位置方，此改写零影响）。吃子权限仍按真实颜色（red）
+  const behavRed = !!(hidden && hidden[r][c]) ? r >= 5 : red
 
   switch (behaviorType(p, r, c, hidden)) {
     case 'K': {
@@ -106,7 +113,7 @@ export function pieceMoves(board, r, c, hidden, flipMode) {
       break
     }
     case 'A': {
-      // 士/仕：斜走一格；揭棋翻开后不受九宫限制
+      // 士/仕：斜走一格；揭棋翻开后不受九宫限制；暗子九宫跟位置方
       for (const [dr, dc] of [
         [1, 1],
         [1, -1],
@@ -115,12 +122,12 @@ export function pieceMoves(board, r, c, hidden, flipMode) {
       ]) {
         const tr = r + dr
         const tc = c + dc
-        if (inBoard(tr, tc) && (free || inPalace(p, tr, tc)) && canPut(tr, tc)) moves.push([tr, tc])
+        if (inBoard(tr, tc) && (free || inPalaceSide(behavRed, tr, tc)) && canPut(tr, tc)) moves.push([tr, tc])
       }
       break
     }
     case 'B': {
-      // 象/相：田字，塞象眼；揭棋翻开后可过河
+      // 象/相：田字，塞象眼；揭棋翻开后可过河；暗子河界跟位置方
       for (const [dr, dc] of [
         [2, 2],
         [2, -2],
@@ -131,8 +138,8 @@ export function pieceMoves(board, r, c, hidden, flipMode) {
         const tc = c + dc
         if (!inBoard(tr, tc)) continue
         if (!free) {
-          if (red && tr < 5) continue
-          if (!red && tr > 4) continue
+          if (behavRed && tr < 5) continue
+          if (!behavRed && tr > 4) continue
         }
         if (board[r + dr / 2][c + dc / 2]) continue
         if (canPut(tr, tc)) moves.push([tr, tc])
@@ -211,11 +218,11 @@ export function pieceMoves(board, r, c, hidden, flipMode) {
       break
     }
     case 'P': {
-      // 兵/卒：向前一格；过河后可横走，不后退
-      const fwd = red ? -1 : 1
+      // 兵/卒：向前一格；过河后可横走，不后退；暗子方向跟位置方
+      const fwd = behavRed ? -1 : 1
       const tr = r + fwd
       if (inBoard(tr, c) && canPut(tr, c)) moves.push([tr, c])
-      const crossed = red ? r <= 4 : r >= 5
+      const crossed = behavRed ? r <= 4 : r >= 5
       if (crossed) {
         for (const dc of [-1, 1]) {
           const tc = c + dc
@@ -415,5 +422,41 @@ export function createFlipGame() {
       hidden[r][c] = true
     })
   }
+  return { board, hidden }
+}
+
+// 揭棋全随机开局：帅/将明置，其余 30 枚（红黑各15）合并洗牌，随机盖到全盘暗子位
+// 红方底线的暗子可能是黑棋，反之亦然；走法行为跟位置方，吃子权限跟真实颜色
+export function createRandomFlipGame() {
+  const board = createInitialBoard()
+  const hidden = Array.from({ length: 10 }, () => Array(9).fill(false))
+  const types = ['R', 'R', 'N', 'N', 'B', 'B', 'A', 'A', 'C', 'C', 'P', 'P', 'P', 'P', 'P']
+  const pieces = []
+  for (const red of [true, false]) {
+    for (const t of types) pieces.push(red ? t : t.toLowerCase())
+  }
+  for (let i = pieces.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const tmp = pieces[i]
+    pieces[i] = pieces[j]
+    pieces[j] = tmp
+  }
+  const squares = []
+  for (const [backRow, cannonRow, pawnRow] of [
+    [0, 2, 3],
+    [9, 7, 6],
+  ]) {
+    for (let c = 0; c < 9; c++) {
+      if (c !== 4) squares.push([backRow, c])
+    }
+    squares.push([cannonRow, 1], [cannonRow, 7])
+    for (let c = 0; c < 9; c += 2) {
+      squares.push([pawnRow, c])
+    }
+  }
+  squares.forEach(([r, c], idx) => {
+    board[r][c] = pieces[idx]
+    hidden[r][c] = true
+  })
   return { board, hidden }
 }
