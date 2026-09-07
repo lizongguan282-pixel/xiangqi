@@ -24,6 +24,10 @@
       <view v-if="emojiBubble.black" class="emoji-bubble">
         <image class="emoji-bubble-img" :src="emojiUrl(emojiBubble.black)" mode="aspectFit" />
       </view>
+      <!-- 短语气泡：显示在头像旁，3 秒后消失 -->
+      <view v-if="phraseBubble.black" class="phrase-bubble">
+        <text class="phrase-bubble-text">{{ phraseText(phraseBubble.black) }}</text>
+      </view>
       <!-- 黑方战利品：黑方吃到的暗子对红方视角只显示"？" -->
       <view class="cap-tray">
         <view
@@ -138,6 +142,10 @@
     <view class="emoji-btn" @click="toggleEmojiPanel">
       <text>😀</text>
     </view>
+    <!-- 快捷短语：表情图标旁的短语按钮（点击开/关短语面板） -->
+    <view class="phrase-btn" @click="togglePhrasePanel">
+      <text>💬</text>
+    </view>
     <!-- 表情选择面板：白色圆角框，网格展示，超出可滚动；点遮罩关闭 -->
     <view class="mask emoji-mask" v-if="showEmojiPanel" @click="showEmojiPanel = false">
       <view class="emoji-panel" @click.stop>
@@ -150,6 +158,23 @@
               @click="pickEmoji(e)"
             >
               <image class="emoji-item-img" :src="emojiUrl(e)" mode="aspectFit" />
+            </view>
+          </view>
+        </scroll-view>
+      </view>
+    </view>
+    <!-- 短语选择面板：白色圆角框，文字网格，点击发送；点遮罩关闭 -->
+    <view class="mask phrase-mask" v-if="showPhrasePanel" @click="showPhrasePanel = false">
+      <view class="phrase-panel" @click.stop>
+        <scroll-view class="phrase-scroll" scroll-y :show-scrollbar="true">
+          <view class="phrase-grid">
+            <view
+              v-for="(p, i) in phrases"
+              :key="i"
+              class="phrase-item"
+              @click="pickPhrase(p)"
+            >
+              <text class="phrase-item-text">{{ phraseText(p) }}</text>
             </view>
           </view>
         </scroll-view>
@@ -190,6 +215,10 @@
       <!-- 表情气泡：显示在头像旁，3 秒后消失 -->
       <view v-if="emojiBubble.red" class="emoji-bubble">
         <image class="emoji-bubble-img" :src="emojiUrl(emojiBubble.red)" mode="aspectFit" />
+      </view>
+      <!-- 短语气泡：显示在头像旁，3 秒后消失 -->
+      <view v-if="phraseBubble.red" class="phrase-bubble">
+        <text class="phrase-bubble-text">{{ phraseText(phraseBubble.red) }}</text>
       </view>
       <!-- 红方战利品：红方吃到的暗子对黑方视角只显示"？" -->
       <view class="cap-tray">
@@ -258,11 +287,33 @@ const STEP_TIME = 60 // 步时 1 分
 // 背景音乐外链（CDN / 自有服务器），不打入小程序包（避免超 2MB 限制）
 // 注意：该域名必须已加入小程序后台「downloadFile 合法域名」，否则真机无法加载
 const BGM_URL = 'https://gcwtnunyhfap.sealosbja.site/static/bgm.mp3'
+// 将军变速版：预渲染 1.2x 变速变调（Audacity 等工具离线做好），避免 playbackRate 跨设备听感不一致
+// 后端需将 bgm_fast.mp3 放到 /static/ 目录（Express 静态服务已挂好）
+const BGM_FAST_URL = 'https://gcwtnunyhfap.sealosbja.site/static/bgm_fast.mp3'
 
 // 局内快捷表情（图片版）：文件位于 src/static/emoji/eN.png
 // 替换/新增表情：直接覆盖同名图片文件，或增删改此数组（代号必须与文件名一致，如 'e9' → e9.png）
 // WS 只传代号（e1~e8），双端各自从本地 static 渲染
 const EMOJIS = ['e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8']
+
+// 局内快捷短语（文字+语音版）：
+//   文字显示：面板内直接渲染 phraseMap[code].text
+//   语音文件：src/static/voice/vN.mp3（前端包内，和 move.wav 同理）
+//   WS 只传代号（v1~v8），后端白名单校验，双方各自从本地 static 渲染/播放
+// 修改说明：改短语文字 → 改 phraseMap 里对应 code 的 text；
+//          增删短语 → 增删 phraseMap 项 + 同步改后端白名单；
+//          换语音 → 替换对应 vN.mp3 文件；后端零改动
+const PHRASES = ['v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7', 'v8']
+const phraseMap = {
+  v1: { text: '你走！', voice: '/static/voice/v1.mp3' },
+  v2: { text: '老叟戏顽童', voice: '/static/voice/v2.mp3' },
+  v3: { text: 'Fahh~~', voice: '/static/voice/v3.mp3' },
+  v4: { text: '菜就多练', voice: '/static/voice/v4.mp3' },
+  v5: { text: '认输吧', voice: '/static/voice/v5.mp3' },
+  v6: { text: '等等', voice: '/static/voice/v6.mp3' },
+  v7: { text: '不客气', voice: '/static/voice/v7.mp3' },
+  v8: { text: '加油', voice: '/static/voice/v8.mp3' },
+}
 
 const emptyHidden = () => Array.from({ length: 10 }, () => Array(9).fill(false))
 
@@ -352,7 +403,9 @@ export default {
       unsubs: [], // WebSocket 订阅取消函数
       moveAudio: null, // 走子音效播放器（uni.createInnerAudioContext 单例）
       waitingRematch: false, // 已请求再来一局，等待对方回应
-      bgmAudio: null, // 背景音乐播放器（对局中循环播放）
+      bgmAudio: null, // 背景音乐播放器：原速 bgm.mp3（非将军时播放）
+      bgmFastAudio: null, // 将军变速版播放器：bgm_fast.mp3（将军时从头播放，正常时暂停）
+      _bgmResumePos: null, // 进入将军前 normal bgm 的暂停位置，解将时续播用
       bgmMuted: false, // 背景音乐静音（仅影响 BGM，走子音效不受影响）
       bgmVolume: 0.35, // 背景音乐音量 0~1
       showBgmPanel: false, // 音量调节浮层
@@ -360,6 +413,11 @@ export default {
       emojis: EMOJIS, // 表情列表（模板网格渲染）
       emojiBubble: { red: '', black: '' }, // 头像旁显示的表情气泡
       emojiTimers: { red: null, black: null }, // 气泡消失定时器
+      showPhrasePanel: false, // 短语选择面板
+      phrases: PHRASES, // 短语列表（模板网格渲染）
+      phraseBubble: { red: '', black: '' }, // 头像旁显示的短语气泡
+      phraseTimers: { red: null, black: null }, // 短语气泡消失定时器
+      phraseAudio: null, // 短语语音播放器（独立单例，不影响 BGM）
       // 炮位与兵位坐标（列 0-8，行 0-9）
       marks: [
         { c: 1, r: 2 },
@@ -441,13 +499,21 @@ export default {
     const v = parseFloat(uni.getStorageSync('bgmVolume'))
     if (!isNaN(v) && v >= 0 && v <= 1) this.bgmVolume = v
     try {
-      const audio = uni.createInnerAudioContext()
-      audio.src = BGM_URL // 外链 CDN/服务器音频，包内不携带
-      audio.loop = true
-      audio.volume = this.bgmMuted ? 0 : this.bgmVolume
-      this.bgmAudio = audio
-      this.applyBgmRate() // 初始速度按当前 inCheck（onLoad 时为 false → 1.0x）
-      if (!this.bgmMuted) audio.play()
+      // 双音频方案：原速 bgm.mp3 + 将军变速 bgm_fast.mp3，各用独立 InnerAudioContext
+      const normal = uni.createInnerAudioContext()
+      normal.src = BGM_URL
+      normal.loop = true
+      normal.volume = this.bgmMuted ? 0 : this.bgmVolume
+      this.bgmAudio = normal
+
+      const fast = uni.createInnerAudioContext()
+      fast.src = BGM_FAST_URL
+      fast.loop = true
+      fast.volume = this.bgmMuted ? 0 : this.bgmVolume
+      this.bgmFastAudio = fast
+
+      // 初始状态（非将军）：只播 normal，fast 保持暂停
+      this.applyBgmCheckState()
     } catch (e) {}
     this.loadState()
     this.bindWS()
@@ -470,9 +536,24 @@ export default {
       } catch (e) {}
       this.bgmAudio = null
     }
+    if (this.bgmFastAudio) {
+      try {
+        this.bgmFastAudio.destroy()
+      } catch (e) {}
+      this.bgmFastAudio = null
+    }
     // 清理表情气泡定时器
     clearTimeout(this.emojiTimers.red)
     clearTimeout(this.emojiTimers.black)
+    clearTimeout(this.phraseTimers.red)
+    clearTimeout(this.phraseTimers.black)
+    // 销毁短语语音播放器（独立单例，不影响 BGM/走子音效）
+    if (this.phraseAudio) {
+      try {
+        this.phraseAudio.destroy()
+      } catch (e) {}
+      this.phraseAudio = null
+    }
     // 取消所有 WebSocket 订阅
     this.unsubs.forEach((off) => off())
     this.unsubs = []
@@ -604,6 +685,16 @@ export default {
           }
         })
       )
+      // phrase：对方发送的快捷短语 → 在其头像旁显示文字气泡 + 播放对应语音
+      //（自己发的已在本地显示+播放，服务端回显 same from 时跳过防重复）
+      this.unsubs.push(
+        ws.on('phrase', (data) => {
+          if (data && data.from && data.code && data.from !== this.myColor) {
+            this.showPhrase(data.from, data.code)
+            this.playPhrase(data.code)
+          }
+        })
+      )
     },
     // 首次进入：拉取服务端局面并启动轮询同步
     async loadState() {
@@ -697,11 +788,10 @@ export default {
         this.startSync()
         this.resumeBgm() // 新对局开始，恢复背景音乐
       }
-      // 将军进入/解除时同步 BGM 速度：将军 1.2x，解除 1.0x
-      // （rate 由 inCheck 派生，所有修改 inCheck 的点都必须调用 applyBgmRate）
+      // 将军进入/解除时切换 BGM：将军→从头播 bgm_fast；解将→从头播 normal
       const wasCheck = this.inCheck
       this.inCheck = !!state.check
-      if (wasCheck !== this.inCheck) this.applyBgmRate()
+      if (wasCheck !== this.inCheck) this.applyBgmCheckState()
       // 将军浮字只在"新一步造成将军"时弹一次（moveCount 去重），轮询/重发不重复弹
       if (state.check) {
         if (this.firedCheckCount !== state.moveCount) {
@@ -718,12 +808,13 @@ export default {
       this.ending = true
       clearInterval(this.timer)
       this.inCheck = false
-      this.applyBgmRate() // 终局强制恢复 1.0x：若认输发生在将军期，下一局 resumeBgm 不会继承 1.2x
-      // 对局结束：背景音乐停止（仅正式对局中播放；走子音效不受影响）
+      // 终局：两个 BGM 播放器都暂停 + 清空恢复位置（下一局由 resumeBgm / applyBgmCheckState 从正常态恢复）
+      this._bgmResumePos = null
       if (this.bgmAudio) {
-        try {
-          this.bgmAudio.pause()
-        } catch (e) {}
+        try { this.bgmAudio.pause() } catch (e) {}
+      }
+      if (this.bgmFastAudio) {
+        try { this.bgmFastAudio.pause() } catch (e) {}
       }
       // reason 枚举与 docs/api.md §3.3 对齐：绝杀(将死) / 困毙 / 认输 / 超时
       if (reason === '绝杀' || reason === '困毙') {
@@ -766,68 +857,104 @@ export default {
         // 音效播放失败不影响对局
       }
     },
-    // 恢复背景音乐（对局进行中且未静音时）
+    // 恢复背景音乐（对局进行中且未静音时）：根据当前是否将军决定恢复 normal 还是 fast
     resumeBgm() {
-      if (this.bgmMuted || !this.bgmAudio) return
-      try {
-        this.bgmAudio.play()
-      } catch (e) {}
+      if (this.bgmMuted) return
+      if (this.inCheck) {
+        if (!this.bgmFastAudio) return
+        try { this.bgmFastAudio.play() } catch (e) {}
+      } else {
+        if (!this.bgmAudio) return
+        try { this.bgmAudio.play() } catch (e) {}
+      }
     },
-    // BGM 速度由 inCheck 派生：将军 1.2x（紧张感），其余 1.0x。
-    // 所有修改 this.inCheck 的点（applyServerState / handleEnd）都必须调用本方法，
-    // 否则会出现"将军期认输后下一局 BGM 仍 1.2x"的状态泄漏。
-    applyBgmRate() {
-      if (!this.bgmAudio) return
-      const rate = this.inCheck ? 1.2 : 1.0
-      try {
-        if (Math.abs((this.bgmAudio.playbackRate || 1) - rate) > 0.01) {
-          this.bgmAudio.playbackRate = rate
+    // 双音频方案：将军时暂停原速 bgm、从头播 bgm_fast；解将军时暂停 fast、从暂停处恢复 normal。
+    // 所有修改 this.inCheck 的点（applyServerState / handleEnd / restart）都必须调用本方法，
+    // 否则会出现"将军期认输后下一局 BGM 仍跑 fast"的状态泄漏。
+    applyBgmCheckState() {
+      if (!this.bgmAudio || !this.bgmFastAudio) return
+      if (this.bgmMuted) return // 静音时两个都不播，切换留给 toggleBgmMute 处理
+      if (this.inCheck) {
+        // 进入将军：保存 normal 当前播放位置，pause normal，fast 从头开始
+        try {
+          this._bgmResumePos = this.bgmAudio.currentTime || 0
+          this.bgmAudio.pause()
+        } catch (e) {}
+        try { this.bgmFastAudio.seek(0); this.bgmFastAudio.play() } catch (e) {}
+      } else {
+        // 解除将军 / 初始 / 终局复位：pause fast，normal 恢复到进入将军前的位置续播；
+        // 若无保存位置（初始 onLoad、终局后新对局），则从头开始
+        try { this.bgmFastAudio.pause() } catch (e) {}
+        if (this._bgmResumePos != null && this._bgmResumePos > 0) {
+          try { this.bgmAudio.seek(this._bgmResumePos); this.bgmAudio.play() } catch (e) {}
+          this._bgmResumePos = null
+        } else {
+          try { this.bgmAudio.seek(0); this.bgmAudio.play() } catch (e) {}
         }
-      } catch (e) {}
+      }
     },
     // H5 浏览器可能拦截自动播放：任意点击棋盘时兜底补播（小程序无影响）
     ensureBgm() {
-      if (this.bgmAudio && !this.bgmMuted && !this.gameOver && !this.pendingOver) {
+      if ((this.bgmAudio || this.bgmFastAudio) && !this.bgmMuted && !this.gameOver && !this.pendingOver) {
         this.resumeBgm()
       }
     },
     // 点击左下角音量图标：静音/取消静音（仅 BGM，走子音效独立不受影响）
+    // 静音时两个播放器都 pause；取消静音时根据当前 inCheck 恢复对应播放器
     toggleBgmMute() {
       this.bgmMuted = !this.bgmMuted
       uni.setStorageSync('bgmMuted', this.bgmMuted)
       if (this.bgmAudio) {
         try {
+          this.bgmAudio.volume = this.bgmMuted ? 0 : this.bgmVolume
           if (this.bgmMuted) {
             this.bgmAudio.pause()
-          } else {
-            this.bgmAudio.volume = this.bgmVolume
-            if (!this.gameOver && !this.pendingOver) this.bgmAudio.play()
           }
         } catch (e) {}
       }
+      if (this.bgmFastAudio) {
+        try {
+          this.bgmFastAudio.volume = this.bgmMuted ? 0 : this.bgmVolume
+          if (this.bgmMuted) {
+            this.bgmFastAudio.pause()
+          }
+        } catch (e) {}
+      }
+      // 取消静音时：根据当前状态恢复对应播放器（非终局才恢复）
+      if (!this.bgmMuted && !this.gameOver && !this.pendingOver) {
+        this.applyBgmCheckState()
+      }
     },
     // 音量滑块调整（0~100 → 0~1）；拖动即取消静音并持久化
+    // 音量同时作用于 normal 和 fast 两个播放器
     onBgmSliderChange(e) {
       const v = e.detail.value / 100
       this.bgmVolume = v
       uni.setStorageSync('bgmVolume', v)
+      const wasMuted = this.bgmMuted
       if (v > 0 && this.bgmMuted) {
         this.bgmMuted = false
         uni.setStorageSync('bgmMuted', false)
       }
       if (this.bgmAudio) {
-        try {
-          this.bgmAudio.volume = v
-        } catch (e) {}
+        try { this.bgmAudio.volume = v } catch (e) {}
+      }
+      if (this.bgmFastAudio) {
+        try { this.bgmFastAudio.volume = v } catch (e) {}
+      }
+      // 从静音滑出声音时：恢复当前活跃的播放器（非终局）
+      if (wasMuted && !this.bgmMuted && !this.gameOver && !this.pendingOver) {
+        this.applyBgmCheckState()
       }
     },
     // 表情图片路径：代号 eN → /static/emoji/eN.png
     emojiUrl(code) {
       return '/static/emoji/' + code + '.png'
     },
-    // 点击表情按钮：开/关表情选择面板
+    // 点击表情按钮：开/关表情选择面板（互斥关短语面板）
     toggleEmojiPanel() {
       this.showEmojiPanel = !this.showEmojiPanel
+      if (this.showEmojiPanel) this.showPhrasePanel = false
     },
     // 选中表情：关面板 → 本地气泡立即显示 → WS 发给对方（后端未上线时仅自己可见）
     pickEmoji(code) {
@@ -843,6 +970,50 @@ export default {
       this.emojiTimers[side] = setTimeout(() => {
         this.emojiBubble[side] = ''
       }, 3000)
+    },
+    // 短语文字：代号 vN → phraseMap 里的 text
+    phraseText(code) {
+      return (phraseMap[code] && phraseMap[code].text) || code
+    },
+    // 点击短语按钮：开/关短语选择面板（互斥关表情面板）
+    togglePhrasePanel() {
+      this.showPhrasePanel = !this.showPhrasePanel
+      if (this.showPhrasePanel) this.showEmojiPanel = false
+    },
+    // 选中短语：关面板 → 本地气泡+语音立即显示/播放 → WS 发给对方
+    pickPhrase(code) {
+      this.showPhrasePanel = false
+      this.showPhrase(this.myColor, code)
+      this.playPhrase(code)
+      api.ws.send({ type: 'phrase', roomId: this.roomId, code })
+    },
+    // 短语气泡：显示在 side（red/black）玩家头像旁，3 秒后自动消失
+    showPhrase(side, code) {
+      if (side !== 'red' && side !== 'black') return
+      clearTimeout(this.phraseTimers[side])
+      this.phraseBubble[side] = code
+      this.phraseTimers[side] = setTimeout(() => {
+        this.phraseBubble[side] = ''
+      }, 3000)
+    },
+    // 播放短语语音：独立 InnerAudioContext 单例，重复 seek(0)+play 避免叠音；
+    // 完全独立于 bgmAudio / bgmFastAudio / moveAudio，互不影响
+    playPhrase(code) {
+      try {
+        if (!this.phraseAudio) {
+          this.phraseAudio = uni.createInnerAudioContext()
+          this.phraseAudio.volume = 0.9
+        }
+        const info = phraseMap[code]
+        if (!info || !info.voice) return
+        if (this.phraseAudio.src !== info.voice) {
+          this.phraseAudio.src = info.voice
+        }
+        this.phraseAudio.seek(0)
+        this.phraseAudio.play()
+      } catch (e) {
+        // 语音播放失败不影响对局（和走子音效同理）
+      }
     },
     tick() {
       if (this.gameOver || this.pendingOver) {
@@ -1001,7 +1172,7 @@ export default {
           // 重启轮询兜底：若 game_start 推送丢失，2s 轮询会拉到新局面自愈
           this.startTimer()
           this.startSync()
-          this.applyBgmRate() // 新对局速度归一（handleEnd 已复位，此处为 resumeBgm 前的双保险）
+          this.applyBgmCheckState() // 新对局 BGM 状态归一（handleEnd 已 pause 两者 + inCheck=false，此处为 resumeBgm 前的双保险）
           this.resumeBgm() // 新对局开始，恢复背景音乐
         } else {
           // 弹出"等待对方回应"窗口，等对方也点再来一局（game_start 到来时自动关闭）
@@ -1804,5 +1975,95 @@ export default {
     transform: scale(1);
     opacity: 1;
   }
+}
+
+/* 快捷短语按钮：表情按钮右侧 */
+.phrase-btn {
+  position: fixed;
+  left: 184rpx;
+  bottom: 170rpx;
+  width: 72rpx;
+  height: 72rpx;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  border: 2rpx solid rgba(243, 226, 192, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 34rpx;
+  z-index: 30;
+}
+
+/* 短语选择面板：复用表情面板样式 */
+.phrase-mask {
+  z-index: 40;
+}
+.phrase-panel {
+  position: fixed;
+  left: 20rpx;
+  bottom: 260rpx;
+  width: 460rpx;
+  max-height: 500rpx;
+  background: #ffffff;
+  border-radius: 20rpx;
+  box-shadow: 0 8rpx 30rpx rgba(0, 0, 0, 0.4);
+  padding: 16rpx;
+  box-sizing: border-box;
+  z-index: 41;
+}
+.phrase-scroll {
+  max-height: 468rpx;
+}
+.phrase-grid {
+  display: flex;
+  flex-wrap: wrap;
+}
+.phrase-item {
+  width: 132rpx;
+  height: 72rpx;
+  margin: 6rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12rpx;
+  background: #faf6ed;
+  border: 1rpx solid #e8dcc0;
+}
+.phrase-item:active {
+  background: #f0e6d2;
+}
+.phrase-item-text {
+  font-size: 26rpx;
+  color: #5a3a1a;
+  font-family: 'Kaiti SC', 'STKaiti', 'KaiTi', serif;
+}
+
+/* 短语气泡：和表情气泡同位置/动画，文字版 */
+.phrase-bubble {
+  position: absolute;
+  left: 76rpx;
+  top: -30rpx;
+  z-index: 20;
+  padding: 10rpx 16rpx;
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 18rpx;
+  box-shadow: 0 4rpx 12rpx rgba(0, 0, 0, 0.35);
+  animation: emojiPop 0.25s ease-out;
+  white-space: nowrap;
+}
+.phrase-bubble-text {
+  font-size: 26rpx;
+  color: #5a3a1a;
+  font-family: 'Kaiti SC', 'STKaiti', 'KaiTi', serif;
+}
+.phrase-bubble::after {
+  content: '';
+  position: absolute;
+  left: -8rpx;
+  top: 50%;
+  margin-top: -8rpx;
+  border: 8rpx solid transparent;
+  border-right-color: rgba(255, 255, 255, 0.95);
+  border-left: none;
 }
 </style>
